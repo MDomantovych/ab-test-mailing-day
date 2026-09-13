@@ -93,6 +93,64 @@ def test_within_user_effect_recovers_simulated_lift():
     assert res["n_obs"] == res["n_users"] * msgs
 
 
+def _panel(seed=3, n_users=60, periods=6, effect=0.04):
+    rng = np.random.default_rng(seed)
+    users = np.repeat(np.arange(n_users), periods)
+    weeks = np.tile(np.arange(periods), n_users)
+    user_effect = rng.normal(0, 0.05, n_users)[users]
+    week_effect = np.linspace(0.06, -0.02, periods)[weeks]
+    treat = rng.integers(0, 2, len(users))
+    y = 0.10 + user_effect + week_effect + effect * treat + rng.normal(0, 0.05, len(users))
+    return pd.DataFrame({"user_id": users, "week": weeks, "fri": treat, "y": y})
+
+
+def test_two_way_fe_matches_dense_dummy_regression():
+    import statsmodels.formula.api as smf
+    df = _panel()
+    both = df[df.groupby("user_id").fri.transform("nunique") == 2]
+    dense = smf.ols("y ~ fri + C(user_id) + C(week)", both).fit()
+    res = ab.two_way_fe_effect(df, "user_id", "week", "fri", "y")
+    assert res["coef"] == pytest.approx(dense.params["fri"], abs=1e-6)
+    assert res["n_obs"] == len(both)
+
+
+def test_icc_anova_zero_for_iid_and_positive_for_clustered():
+    rng = np.random.default_rng(0)
+    users = np.repeat(np.arange(300), 10)
+    iid = pd.DataFrame({"user_id": users, "y": (rng.uniform(size=len(users)) < 0.1).astype(int)})
+    res_iid = ab.icc_anova(iid, "user_id", "y")
+    assert res_iid["icc"] < 0.02 and res_iid["deff"] < 1.2
+    # user baselines spread over 0..0.8: between-user variance 0.053 vs within ~0.19 -> ICC about 0.2
+    base = rng.uniform(0.0, 0.8, 300)[users]
+    clustered = pd.DataFrame({"user_id": users, "y": (rng.uniform(size=len(users)) < base).astype(int)})
+    res_cl = ab.icc_anova(clustered, "user_id", "y")
+    assert res_cl["icc"] > 0.15 and res_cl["deff"] > 2.0
+    assert res_cl["avg_cluster_size"] == 10
+
+
+def test_holm_adjust_known_example():
+    out = ab.holm_adjust({"a": 0.01, "b": 0.04, "c": 0.03}).set_index("test")
+    assert out.loc["a", "p_holm"] == pytest.approx(0.03)
+    assert out.loc["b", "p_holm"] == pytest.approx(0.06)
+    assert out.loc["c", "p_holm"] == pytest.approx(0.06)
+    assert bool(out.loc["a", "significant_holm"]) and not bool(out.loc["b", "significant_holm"])
+
+
+def test_heterogeneity_test_detects_interaction():
+    rng = np.random.default_rng(5)
+    n = 20000
+    users = rng.integers(0, 2000, n)
+    seg = rng.integers(0, 2, n)
+    treat = rng.integers(0, 2, n)
+    y_same = (rng.uniform(size=n) < 0.05 + 0.02 * treat).astype(int)
+    y_diff = (rng.uniform(size=n) < 0.05 + 0.02 * treat + 0.05 * treat * seg).astype(int)
+    df = pd.DataFrame({"user_id": users, "seg": seg, "fri": treat, "y_same": y_same, "y_diff": y_diff})
+    same = ab.heterogeneity_test(df, "fri", "seg", "y_same", "user_id")
+    diff = ab.heterogeneity_test(df, "fri", "seg", "y_diff", "user_id")
+    assert same["n_terms"] == 1 and 0 <= same["p"] <= 1
+    assert diff["p"] < 0.001
+
+
 # ---------------------------------------------------------------- integration with the real log
 @pytest.mark.skipif(not DATA.exists(), reason="raw log not present")
 def test_observation_table_matches_report_numbers():

@@ -12,6 +12,7 @@ import pandas as pd
 import statsmodels.formula.api as smf
 from scipy import stats
 from scipy.optimize import brentq
+from statsmodels.stats.multitest import multipletests
 from statsmodels.stats.power import NormalIndPower
 from statsmodels.stats.proportion import proportion_confint, proportion_effectsize, proportions_ztest
 
@@ -142,6 +143,60 @@ def within_user_effect(df: pd.DataFrame, user_col: str, treat_col: str, y: str) 
     ci = model.conf_int().loc["_t_dm"]
     return {"coef": float(model.params["_t_dm"]), "ci_low": float(ci[0]), "ci_high": float(ci[1]),
             "p": float(model.pvalues["_t_dm"]), "n_users": int(both[user_col].nunique()), "n_obs": len(both)}
+
+
+def two_way_fe_effect(df: pd.DataFrame, user_col: str, time_col: str, treat_col: str, y: str,
+                      controls: tuple[str, ...] = (), tol: float = 1e-10, max_iter: int = 1000) -> dict:
+    """Two-way fixed effects (user + time period) by alternating demeaning, user-clustered SE.
+
+    Exact for unbalanced panels (iterates until both group means are zero). Only users that
+    received both treatment values contribute within-user variation, so the sample is restricted to them.
+    """
+    both = df[df.groupby(user_col)[treat_col].transform("nunique") == 2].copy()
+    cols = [y, treat_col, *controls]
+    demeaned = both[cols].astype(float)
+    for _ in range(max_iter):
+        before = demeaned.to_numpy(copy=True)
+        demeaned = demeaned - demeaned.groupby(both[user_col]).transform("mean")
+        demeaned = demeaned - demeaned.groupby(both[time_col]).transform("mean")
+        if np.abs(demeaned.to_numpy() - before).max() < tol:
+            break
+    demeaned.columns = [f"dm_{c}" for c in cols]
+    formula = f"dm_{y} ~ " + " + ".join(f"dm_{c}" for c in [treat_col, *controls]) + " - 1"
+    model = smf.ols(formula, demeaned).fit(cov_type="cluster", cov_kwds={"groups": both[user_col]})
+    ci = model.conf_int().loc[f"dm_{treat_col}"]
+    return {"coef": float(model.params[f"dm_{treat_col}"]), "ci_low": float(ci[0]), "ci_high": float(ci[1]),
+            "p": float(model.pvalues[f"dm_{treat_col}"]), "n_users": int(both[user_col].nunique()), "n_obs": len(both)}
+
+
+def icc_anova(df: pd.DataFrame, cluster_col: str, y: str) -> dict:
+    """One-way ANOVA estimate of the intraclass correlation and the design effect
+    for a design that randomizes whole clusters (e.g. users)."""
+    groups = df.groupby(cluster_col)[y].agg(["mean", "size"])
+    grand = df[y].mean()
+    k, n = len(groups), len(df)
+    n0 = (n - (groups["size"] ** 2).sum() / n) / (k - 1)
+    msb = (groups["size"] * (groups["mean"] - grand) ** 2).sum() / (k - 1)
+    msw = ((df[y] - df[cluster_col].map(groups["mean"])) ** 2).sum() / (n - k)
+    icc = max(float((msb - msw) / (msb + (n0 - 1) * msw)), 0.0)
+    avg_size = n / k
+    return {"icc": icc, "avg_cluster_size": float(avg_size), "deff": float(1 + (avg_size - 1) * icc)}
+
+
+def heterogeneity_test(df: pd.DataFrame, treat_col: str, segment_col: str, y: str, user_col: str) -> dict:
+    """Joint test that the treatment effect is the same in every segment (all interaction terms = 0)."""
+    model = smf.ols(f"{y} ~ {treat_col} * C({segment_col})", df).fit(cov_type="cluster", cov_kwds={"groups": df[user_col]})
+    terms = [t for t in model.params.index if t.startswith(f"{treat_col}:")]
+    p = float(model.f_test(", ".join(f"{t} = 0" for t in terms)).pvalue)
+    return {"p": p, "n_terms": len(terms)}
+
+
+def holm_adjust(pvalues: dict, alpha: float = 0.05) -> pd.DataFrame:
+    """Holm step-down adjustment for a family of tests given as {name: p}."""
+    names = list(pvalues)
+    raw = np.array([pvalues[name] for name in names], dtype=float)
+    reject, adjusted, _, _ = multipletests(raw, alpha=alpha, method="holm")
+    return pd.DataFrame({"test": names, "p_raw": raw, "p_holm": adjusted, "significant_holm": reject})
 
 
 def paired_weekly_effect(df: pd.DataFrame, week_col: str, treat_col: str, y: str) -> dict:
