@@ -1,0 +1,4 @@
+# HTML export of the notebook is generated; do not count it as project language on GitHub
+notebook/*.html linguist-generated=true
+data/*.csv linguist-vendored=true
+* text=auto eol=lf
