@@ -199,6 +199,29 @@ def holm_adjust(pvalues: dict, alpha: float = 0.05) -> pd.DataFrame:
     return pd.DataFrame({"test": names, "p_raw": raw, "p_holm": adjusted, "significant_holm": reject})
 
 
+def cuped_effect(df: pd.DataFrame, user_col: str, treat_col: str, y: str, covariate: str) -> dict:
+    """CUPED: y_adj = y - theta * (x - mean(x)) with a pre-treatment covariate x; user-clustered SE.
+
+    Observations with a missing covariate (e.g. a user's first send) get the covariate mean, i.e. no adjustment.
+    Returns the adjusted effect, the variance reduction (1 - corr^2) and the raw vs adjusted standard errors.
+    """
+    d = df[[user_col, treat_col, y, covariate]].copy()
+    x = d[covariate].astype(float)
+    x = x.fillna(x.mean())
+    theta = float(np.cov(x, d[y].astype(float))[0, 1] / x.var())
+    corr = float(np.corrcoef(x, d[y].astype(float))[0, 1])
+    d["_y_adj"] = d[y].astype(float) - theta * (x - x.mean())
+    adjusted = smf.ols(f"_y_adj ~ {treat_col}", d).fit(cov_type="cluster", cov_kwds={"groups": d[user_col]})
+    raw = smf.ols(f"{y} ~ {treat_col}", d).fit(cov_type="cluster", cov_kwds={"groups": d[user_col]})
+    ci = adjusted.conf_int().loc[treat_col]
+    return {"coef": float(adjusted.params[treat_col]), "ci_low": float(ci[0]), "ci_high": float(ci[1]),
+            "p": float(adjusted.pvalues[treat_col]), "theta": theta, "corr": corr,
+            "variance_reduction": float(corr ** 2),      # теоретичне зменшення дисперсії для незалежних спостережень
+            "se_raw": float(raw.bse[treat_col]),
+            "se_cuped": float(adjusted.bse[treat_col]), "n_obs": int(len(d)),
+            "covariate_missing_share": float(df[covariate].isna().mean())}
+
+
 def paired_weekly_effect(df: pd.DataFrame, week_col: str, treat_col: str, y: str) -> dict:
     """Treat each week as a pair (rate under treat=1 minus rate under treat=0); t-test and sign test."""
     weekly = df.groupby([week_col, treat_col])[y].mean().unstack().dropna()

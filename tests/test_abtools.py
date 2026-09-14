@@ -151,6 +151,30 @@ def test_heterogeneity_test_detects_interaction():
     assert diff["p"] < 0.001
 
 
+def test_cuped_reduces_variance_and_keeps_effect_unbiased():
+    rng = np.random.default_rng(11)
+    n_users, per_user = 1500, 30          # довга історія користувача -> попередній CTR інформативний
+    users = np.repeat(np.arange(n_users), per_user)
+    base = rng.uniform(0.02, 0.20, n_users)[users]           # користувацький рівень схильності до кліку
+    treat = rng.integers(0, 2, len(users))
+    y = (rng.uniform(size=len(users)) < base + 0.02 * treat).astype(int)
+    df = pd.DataFrame({"user_id": users, "fri": treat, "clicked": y})
+    # коваріата: попередній CTR користувача (без поточного спостереження); перше спостереження -> NaN
+    df["msg_no"] = df.groupby("user_id").cumcount() + 1
+    df["prior_ctr"] = ((df.groupby("user_id").clicked.cumsum() - df.clicked) / (df.msg_no - 1)).where(df.msg_no > 1)
+    res = ab.cuped_effect(df, "user_id", "fri", "clicked", "prior_ctr")
+    assert 0 < res["variance_reduction"] < 1 and res["corr"] > 0.03   # бінарний результат: кореляція з попереднім CTR невелика, але додатна
+    assert res["ci_low"] < 0.02 < res["ci_high"]                       # ефект не зсувається
+    assert res["covariate_missing_share"] == pytest.approx(1 / per_user)
+    # на незалежних спостереженнях (без кластерів) CUPED має зменшувати SE
+    iid = pd.DataFrame({"user_id": np.arange(20000), "fri": rng.integers(0, 2, 20000)})
+    x = rng.normal(size=20000)
+    iid["clicked"] = (rng.uniform(size=20000) < 0.1 + 0.03 * x.clip(-2, 2) + 0.02 * iid.fri).astype(int)
+    iid["x"] = x
+    res_iid = ab.cuped_effect(iid, "user_id", "fri", "clicked", "x")
+    assert res_iid["se_cuped"] < res_iid["se_raw"]
+
+
 # ---------------------------------------------------------------- integration with the real log
 @pytest.mark.skipif(not DATA.exists(), reason="raw log not present")
 def test_observation_table_matches_report_numbers():
