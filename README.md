@@ -1,5 +1,7 @@
 # День розсилки: вівторок чи п'ятниця? Квазіексперимент на тригерних воркфлоу
 
+![tests](https://github.com/MDomantovych/ab-test-mailing-day/actions/workflows/tests.yml/badge.svg)
+
 <details>
 <summary><b>English summary</b></summary>
 
